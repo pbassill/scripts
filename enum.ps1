@@ -4,24 +4,16 @@
 
 .DESCRIPTION
   Gathers detailed information about Windows services and processes from a non-privileged user context.
-  Outputs a narrative summary (TXT) and several CSVs:
-    - services_all.csv                  : all services with rich metadata (state, start mode, account, path, PID, signature, hash)
-    - services_running.csv              : subset of running services
-    - services_potentially_writable.csv : services whose binary or parent directory appears user-writable (heuristic)
-    - processes_all.csv                 : all processes with key details
-    - inventory.json                    : compact JSON snapshot (services + processes)
-
-  This PoC is non-destructive and illustrates why unrestricted PowerShell provides substantial reconnaissance value.
-
-.PARAMETER OutputPath
-  Optional. Directory to receive outputs. Defaults to Desktop\PS-Enum-<timestamp>.
-
-.EXAMPLE
-  .\ps-enum-services.ps1
-  .\ps-enum-services.ps1 -OutputPath "C:\Temp\ps-enum"
+  Outputs:
+    - summary.txt
+    - services_all.csv
+    - services_running.csv
+    - services_potentially_writable.csv
+    - processes_all.csv
+    - inventory.json
 
 .NOTES
-  Designed for standard user execution. Requires PowerShell 5+ (works in Windows PowerShell and PowerShell 7).
+  Works in Windows PowerShell 5+ and PowerShell 7+. Read-only; no admin required.
 #>
 
 [CmdletBinding()]
@@ -29,7 +21,9 @@ param(
   [string]$OutputPath = (Join-Path -Path $env:USERPROFILE -ChildPath ("Desktop\PS-Enum-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss")))
 )
 
-# region Helpers
+# ========================
+# Helpers
+# ========================
 
 function New-OutputFolder {
   param([string]$Path)
@@ -52,11 +46,6 @@ function Get-NormalisedPath {
 }
 
 function Test-WorldWritable {
-  <#
-    Returns an object indicating whether BUILTIN\Users or Everyone appear to have Write/Modify style rights
-    on the given file and on its parent directory. This is a heuristic for demo/reporting purposes and not
-    a full ACL audit.
-  #>
   param([string]$TargetPath)
 
   $result = [pscustomobject]@{
@@ -136,11 +125,18 @@ function Get-FileMetadata {
   return $meta
 }
 
-# endregion Helpers
+function Get-ProcessStartTimeSafe {
+  param([System.Diagnostics.Process]$Process)
+  try { return $Process.StartTime } catch { return $null }
+}
 
-# region Preparation
+# ========================
+# Prep and paths
+# ========================
+
 $ErrorActionPreference = 'Stop'
 New-OutputFolder -Path $OutputPath
+
 $summaryPath = Join-Path $OutputPath 'summary.txt'
 $svcAllCsv   = Join-Path $OutputPath 'services_all.csv'
 $svcRunCsv   = Join-Path $OutputPath 'services_running.csv'
@@ -152,10 +148,12 @@ $jsonPath    = Join-Path $OutputPath 'inventory.json'
 "Output folder: $OutputPath" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 "User: $env:USERNAME  | Computer: $env:COMPUTERNAME  | Domain: $env:USERDOMAIN" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 "" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
-# endregion
 
-# region Collect Services
-Write-Host "Enumerating services..." 
+# ========================
+# Services
+# ========================
+
+Write-Host "Enumerating services..."
 $services = Get-CimInstance -ClassName Win32_Service | Sort-Object DisplayName
 
 $svcRich = foreach ($s in $services) {
@@ -196,7 +194,7 @@ $svcRich = foreach ($s in $services) {
     ACL_Reason            = $aclCheck.Reason
     CPU                   = if ($proc) { '{0:N2}' -f $proc.CPU } else { $null }
     WorkingSetMB          = if ($proc) { [math]::Round($proc.WorkingSet64/1MB,2) } else { $null }
-    StartTime             = if ($proc) { $proc.StartTime } else { $null }
+    StartTime             = if ($proc) { Get-ProcessStartTimeSafe -Process $proc } else { $null }
   }
 }
 
@@ -214,21 +212,25 @@ $totalCount   = $svcRich.Count
 "Running services CSV: $svcRunCsv" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 "Potentially writable services CSV: $svcWriteCsv" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 "" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
-# endregion
 
-# region Collect Processes
+# ========================
+# Processes
+# ========================
+
 Write-Host "Enumerating processes..."
 $procs = Get-Process | Sort-Object ProcessName | ForEach-Object {
   $path = $null
   try { $path = $_.Path } catch {}
   $meta = if ($path) { Get-FileMetadata -Path $path } else { [pscustomobject]@{} }
 
+  $start = Get-ProcessStartTimeSafe -Process $_
+
   [pscustomobject]@{
     PID             = $_.Id
     Name            = $_.ProcessName
     CPU             = '{0:N2}' -f $_.CPU
     WS_MB           = [math]::Round($_.WorkingSet64/1MB,2)
-    StartTime       = try { $_.StartTime } catch { $null }
+    StartTime       = $start
     Path            = $path
     CompanyName     = $meta.CompanyName
     ProductName     = $meta.ProductName
@@ -239,14 +241,17 @@ $procs = Get-Process | Sort-Object ProcessName | ForEach-Object {
     Signer          = $meta.Signer
   }
 }
+
 $procs | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $procAllCsv
 
 "Processes enumerated: $($procs.Count)" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 "Processes CSV: $procAllCsv" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 "" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
-# endregion
 
-# region JSON snapshot
+# ========================
+# JSON snapshot
+# ========================
+
 Write-Host "Writing JSON inventory..."
 $inventory = [pscustomobject]@{
   Hostname  = $env:COMPUTERNAME
@@ -257,7 +262,6 @@ $inventory = [pscustomobject]@{
 }
 $inventory | ConvertTo-Json -Depth 5 | Out-File -FilePath $jsonPath -Encoding UTF8
 "JSON snapshot: $jsonPath" | Out-File -FilePath $summaryPath -Append -Encoding UTF8
-# endregion
 
 "Enumeration complete." | Out-File -FilePath $summaryPath -Append -Encoding UTF8
 Write-Host "`nCompleted. Outputs written to: $OutputPath" -ForegroundColor Green
