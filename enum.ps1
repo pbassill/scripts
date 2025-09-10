@@ -5,11 +5,11 @@
 .DESCRIPTION
   Gathers detailed information about Windows services and processes from a non-privileged user context.
   Outputs a narrative summary (TXT) and several CSVs:
-    - services_all.csv            : all services with rich metadata (state, start mode, account, path, PID, signature, hash)
-    - services_running.csv        : subset of running services
+    - services_all.csv                  : all services with rich metadata (state, start mode, account, path, PID, signature, hash)
+    - services_running.csv              : subset of running services
     - services_potentially_writable.csv : services whose binary or parent directory appears user-writable (heuristic)
-    - processes_all.csv           : all processes with key details
-    - inventory.json              : compact JSON snapshot (services + processes)
+    - processes_all.csv                 : all processes with key details
+    - inventory.json                    : compact JSON snapshot (services + processes)
 
   This PoC is non-destructive and illustrates why unrestricted PowerShell provides substantial reconnaissance value.
 
@@ -41,14 +41,11 @@ function New-OutputFolder {
 function Get-NormalisedPath {
   param([string]$RawPath)
   if ([string]::IsNullOrWhiteSpace($RawPath)) { return $null }
-  # Services often have quoted exe path + arguments; extract the executable portion.
   $p = $RawPath.Trim()
   if ($p.StartsWith('"')) {
-    # Quoted path
     $end = $p.IndexOf('"',1)
     if ($end -gt 1) { return $p.Substring(1, $end-1) }
   }
-  # Split on first space; crude but effective for typical cases
   $firstSpace = $p.IndexOf(' ')
   if ($firstSpace -gt 0) { return $p.Substring(0, $firstSpace) }
   return $p
@@ -63,12 +60,12 @@ function Test-WorldWritable {
   param([string]$TargetPath)
 
   $result = [pscustomobject]@{
-    FileExists            = $false
-    FileWritableByUsers   = $false
-    FileWritableByEveryone= $false
-    DirWritableByUsers    = $false
-    DirWritableByEveryone = $false
-    Reason                = $null
+    FileExists             = $false
+    FileWritableByUsers    = $false
+    FileWritableByEveryone = $false
+    DirWritableByUsers     = $false
+    DirWritableByEveryone  = $false
+    Reason                 = $null
   }
 
   try {
@@ -81,12 +78,14 @@ function Test-WorldWritable {
     $writeMasks = @('Write','Modify','FullControl','WriteData','CreateFiles','AppendData','WriteAttributes','WriteExtendedAttributes')
 
     foreach ($ace in $fileAcl.Access) {
-      if ($ace.IdentityReference -match 'Everyone' -and $ace.FileSystemRights.ToString().Split(',') | Where-Object { $_.Trim() -in $writeMasks }) { $result.FileWritableByEveryone = $true }
-      if ($ace.IdentityReference -match 'Users'    -and $ace.FileSystemRights.ToString().Split(',') | Where-Object { $_.Trim() -in $writeMasks }) { $result.FileWritableByUsers    = $true }
+      $rights = $ace.FileSystemRights.ToString().Split(',') | ForEach-Object { $_.Trim() }
+      if ($ace.IdentityReference -match 'Everyone' -and ($rights | Where-Object { $_ -in $writeMasks })) { $result.FileWritableByEveryone = $true }
+      if ($ace.IdentityReference -match 'Users'    -and ($rights | Where-Object { $_ -in $writeMasks })) { $result.FileWritableByUsers    = $true }
     }
     foreach ($ace in $dirAcl.Access) {
-      if ($ace.IdentityReference -match 'Everyone' -and $ace.FileSystemRights.ToString().Split(',') | Where-Object { $_.Trim() -in $writeMasks }) { $result.DirWritableByEveryone = $true }
-      if ($ace.IdentityReference -match 'Users'    -and $ace.FileSystemRights.ToString().Split(',') | Where-Object { $_.Trim() -in $writeMasks }) { $result.DirWritableByUsers    = $true }
+      $rights = $ace.FileSystemRights.ToString().Split(',') | ForEach-Object { $_.Trim() }
+      if ($ace.IdentityReference -match 'Everyone' -and ($rights | Where-Object { $_ -in $writeMasks })) { $result.DirWritableByEveryone = $true }
+      if ($ace.IdentityReference -match 'Users'    -and ($rights | Where-Object { $_ -in $writeMasks })) { $result.DirWritableByUsers    = $true }
     }
   } catch {
     $result.Reason = "ACL read error: $($_.Exception.Message)"
@@ -98,13 +97,13 @@ function Test-WorldWritable {
 function Get-FileMetadata {
   param([string]$Path)
   $meta = [pscustomobject]@{
-    Exists        = $false
-    CompanyName   = $null
-    FileVersion   = $null
-    ProductName   = $null
-    SHA256        = $null
-    Signature     = $null
-    Signer        = $null
+    Exists          = $false
+    CompanyName     = $null
+    FileVersion     = $null
+    ProductName     = $null
+    SHA256          = $null
+    Signature       = $null
+    Signer          = $null
     SignatureStatus = $null
   }
 
@@ -127,7 +126,7 @@ function Get-FileMetadata {
   try {
     $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
     $meta.Signature       = if ($sig.SignerCertificate) { 'Present' } else { 'None' }
-    $meta.Signer          = $sig.SignerCertificate.Subject -replace '^CN=',''
+    $meta.Signer          = if ($sig.SignerCertificate) { ($sig.SignerCertificate.Subject -replace '^CN=','') } else { $null }
     $meta.SignatureStatus = $sig.Status.ToString()
   } catch {
     $meta.Signature       = 'Unknown'
@@ -164,7 +163,6 @@ $svcRich = foreach ($s in $services) {
   $fileMeta = if ($exePath) { Get-FileMetadata -Path $exePath } else { [pscustomobject]@{} }
   $aclCheck = if ($exePath) { Test-WorldWritable -TargetPath $exePath } else { [pscustomobject]@{} }
 
-  # Some services expose ProcessId = 0 when not running
   $pid = if ($s.ProcessId -and $s.ProcessId -ne 0) { [int]$s.ProcessId } else { $null }
   $proc = $null
   if ($pid) {
@@ -172,33 +170,33 @@ $svcRich = foreach ($s in $services) {
   }
 
   [pscustomobject]@{
-    Name                 = $s.Name
-    DisplayName          = $s.DisplayName
-    State                = $s.State
-    Status               = $s.Status
-    StartMode            = $s.StartMode
-    StartName            = $s.StartName
-    ServiceType          = $s.ServiceType
-    CanPauseContinue     = $s.AcceptPause.ToString()
-    CanStop              = $s.AcceptStop.ToString()
-    ProcessId            = $pid
-    ExePath              = $exePath
-    ExeExists            = $fileMeta.Exists
-    CompanyName          = $fileMeta.CompanyName
-    ProductName          = $fileMeta.ProductName
-    FileVersion          = $fileMeta.FileVersion
-    SHA256               = $fileMeta.SHA256
-    Signature            = $fileMeta.Signature
-    SignatureStatus      = $fileMeta.SignatureStatus
-    Signer               = $fileMeta.Signer
-    FileWritable_Users   = $aclCheck.FileWritableByUsers
-    FileWritable_Everyone= $aclCheck.FileWritableByEveryone
-    DirWritable_Users    = $aclCheck.DirWritableByUsers
-    DirWritable_Everyone = $aclCheck.DirWritableByEveryone
-    ACL_Reason           = $aclCheck.Reason
-    CPU                  = if ($proc) { '{0:N2}' -f $proc.CPU } else { $null }
-    WorkingSetMB         = if ($proc) { [math]::Round($proc.WorkingSet64/1MB,2) } else { $null }
-    StartTime            = if ($proc) { $proc.StartTime } else { $null }
+    Name                  = $s.Name
+    DisplayName           = $s.DisplayName
+    State                 = $s.State
+    Status                = $s.Status
+    StartMode             = $s.StartMode
+    StartName             = $s.StartName
+    ServiceType           = $s.ServiceType
+    CanPauseContinue      = $s.AcceptPause.ToString()
+    CanStop               = $s.AcceptStop.ToString()
+    ProcessId             = $pid
+    ExePath               = $exePath
+    ExeExists             = $fileMeta.Exists
+    CompanyName           = $fileMeta.CompanyName
+    ProductName           = $fileMeta.ProductName
+    FileVersion           = $fileMeta.FileVersion
+    SHA256                = $fileMeta.SHA256
+    Signature             = $fileMeta.Signature
+    SignatureStatus       = $fileMeta.SignatureStatus
+    Signer                = $fileMeta.Signer
+    FileWritable_Users    = $aclCheck.FileWritableByUsers
+    FileWritable_Everyone = $aclCheck.FileWritableByEveryone
+    DirWritable_Users     = $aclCheck.DirWritableByUsers
+    DirWritable_Everyone  = $aclCheck.DirWritableByEveryone
+    ACL_Reason            = $aclCheck.Reason
+    CPU                   = if ($proc) { '{0:N2}' -f $proc.CPU } else { $null }
+    WorkingSetMB          = if ($proc) { [math]::Round($proc.WorkingSet64/1MB,2) } else { $null }
+    StartTime             = if ($proc) { $proc.StartTime } else { $null }
   }
 }
 
@@ -226,19 +224,19 @@ $procs = Get-Process | Sort-Object ProcessName | ForEach-Object {
   $meta = if ($path) { Get-FileMetadata -Path $path } else { [pscustomobject]@{} }
 
   [pscustomobject]@{
-    PID            = $_.Id
-    Name           = $_.ProcessName
-    CPU            = '{0:N2}' -f $_.CPU
-    WS_MB          = [math]::Round($_.WorkingSet64/1MB,2)
-    StartTime      = try { $_.StartTime } catch { $null }
-    Path           = $path
-    CompanyName    = $meta.CompanyName
-    ProductName    = $meta.ProductName
-    FileVersion    = $meta.FileVersion
-    SHA256         = $meta.SHA256
-    Signature      = $meta.Signature
-    SignatureStatus= $meta.SignatureStatus
-    Signer         = $meta.Signer
+    PID             = $_.Id
+    Name            = $_.ProcessName
+    CPU             = '{0:N2}' -f $_.CPU
+    WS_MB           = [math]::Round($_.WorkingSet64/1MB,2)
+    StartTime       = try { $_.StartTime } catch { $null }
+    Path            = $path
+    CompanyName     = $meta.CompanyName
+    ProductName     = $meta.ProductName
+    FileVersion     = $meta.FileVersion
+    SHA256          = $meta.SHA256
+    Signature       = $meta.Signature
+    SignatureStatus = $meta.SignatureStatus
+    Signer          = $meta.Signer
   }
 }
 $procs | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $procAllCsv
@@ -253,7 +251,7 @@ Write-Host "Writing JSON inventory..."
 $inventory = [pscustomobject]@{
   Hostname  = $env:COMPUTERNAME
   Username  = $env:USERNAME
-  WhenUTC   = (Get-Date).ToUniversalTime().ToString('o')
+  WhenUTC   = (Get-Date -Format "O")
   Services  = $svcRich
   Processes = $procs
 }
